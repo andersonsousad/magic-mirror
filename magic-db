@@ -1,0 +1,101 @@
+import cv2
+import numpy as np
+import face_recognition
+import os
+import sqlite3
+import pickle
+
+conn = sqlite3.connect('face_recognition.db')
+c = conn.cursor()
+
+c.execute('''CREATE TABLE IF NOT EXISTS identities (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                encoding BLOB NOT NULL
+            )''')
+conn.commit()
+
+def add_identity(name, encoding):
+    encoding_blob = pickle.dumps(encoding)
+    c.execute("INSERT INTO identities (name, encoding) VALUES (?, ?)", (name, encoding_blob))
+    conn.commit()
+
+def get_all_identities():
+    c.execute("SELECT name, encoding FROM identities")
+    identities = c.fetchall()
+    names = []
+    encodings = []
+    for name, encoding_blob in identities:
+        names.append(name)
+        encodings.append(pickle.loads(encoding_blob))
+    return names, encodings
+
+def load_images_from_folder(path):
+    images = []
+    classNames = []
+    if os.path.exists(path):
+        mylist = os.listdir(path)
+        print(f'Imagens encontradas: {mylist}')
+        for cl in mylist:
+            curImg = cv2.imread(f'{path}/{cl}')
+            if curImg is not None:
+                images.append(curImg)
+                classNames.append(os.path.splitext(cl)[0])
+            else:
+                print(f'Falha ao carregar imagem {cl}')
+    else:
+        print(f'Pasta {path} não encontrada.')
+    return images, classNames
+
+def find_encodings(images, classNames):
+    encodeList = []
+    for img, name in zip(images, classNames):
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        try:
+            encode = face_recognition.face_encodings(img)[0]
+            encodeList.append(encode)
+            add_identity(name, encode)
+        except IndexError:
+            print(f"Nenhum rosto encontrado na imagem {name}.")
+    return encodeList
+
+images, classNames = load_images_from_folder('FaceRecImages')
+if images and classNames:
+    find_encodings(images, classNames)
+
+classNames, encodeListKnown = get_all_identities()
+print('Identidades carregadas do banco de dados:', classNames)
+
+cap = cv2.VideoCapture(0)
+
+while True:
+    success, img = cap.read()
+    if not success:
+        print("Falha ao capturar a imagem da câmera.")
+        break
+
+    imgS = cv2.resize(img, (0, 0), None, 0.25, 0.25)
+    imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
+
+    facesCurFrame = face_recognition.face_locations(imgS)
+    encodesCurFrame = face_recognition.face_encodings(imgS, facesCurFrame)
+
+    for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
+        matches = face_recognition.compare_faces(encodeListKnown, encodeFace)
+        faceDis = face_recognition.face_distance(encodeListKnown, encodeFace)
+        matchIndex = np.argmin(faceDis)
+
+        if matches[matchIndex]:
+            name = classNames[matchIndex].upper()
+            y1, x2, y2, x1 = faceLoc
+            y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 0, 255), cv2.FILLED)
+            cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    cv2.imshow('Webcam', img)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
